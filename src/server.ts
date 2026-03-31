@@ -1,116 +1,120 @@
 import express, { Request, Response } from "express";
-import fs from "fs";
-import path from "path";
-import crypto from "crypto";
+import { ObjectId } from "mongodb";
+import { connectToDatabase } from "./db";
+import { Booking } from "./types/booking";
+import { createBookingSchema, updateBookingSchema } from "./schemas/booking.schema";
 
 const app = express();
 const PORT = 3000;
 
-// Middleware zum Parsen von JSON-Request-Bodies
 app.use(express.json());
 
-// Typ-Definition für ein Booking-Objekt
-type Booking = {
-  id: string;
-  name: string;
-  startDate: string;
-  endDate: string;
-};
-
-// Pfad zur JSON-Datei für persistente Speicherung
-const filePath = path.join(__dirname, "..", "data", "bookings.json");
-
-// Liest alle Bookings aus der JSON-Datei
-function readBookings(): Booking[] {
-  const data = fs.readFileSync(filePath, "utf-8");
-  return JSON.parse(data);
+function toBookingResponse(booking: Booking & { _id: ObjectId }) {
+  return {
+    id: booking._id.toString(),
+    name: booking.name,
+    startDate: booking.startDate,
+    endDate: booking.endDate,
+  };
 }
 
-// Schreibt alle Bookings in die JSON-Datei mit Formatierung
-function writeBookings(bookings: Booking[]): void {
-  fs.writeFileSync(filePath, JSON.stringify(bookings, null, 2), "utf-8");
-}
+app.get("/api/bookings", async (_req: Request, res: Response) => {
+  const db = await connectToDatabase();
+  const bookings = await db.collection<Booking>("bookings").find().toArray();
 
-// GET: Alle Bookings abrufen
-app.get("/api/bookings", (_req: Request, res: Response) => {
-  res.json(readBookings());
+  res.json(
+    bookings.map((booking) =>
+      toBookingResponse(booking as Booking & { _id: ObjectId })
+    )
+  );
 });
 
-// GET: Ein spezifisches Booking nach ID abrufen
-app.get("/api/bookings/:id", (req: Request, res: Response) => {
-  const booking = readBookings().find((b) => b.id === req.params.id);
+app.get("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid booking id" });
+  }
 
-  // Fehlerbehandlung: Booking nicht gefunden
+  const db = await connectToDatabase();
+  const booking = await db
+    .collection<Booking>("bookings")
+    .findOne({ _id: new ObjectId(req.params.id) });
+
   if (!booking) {
     return res.status(404).json({ message: "Booking not found" });
   }
 
-  res.json(booking);
+  res.json(toBookingResponse(booking as Booking & { _id: ObjectId }));
 });
 
-// POST: Neues Booking erstellen
-app.post("/api/bookings", (req: Request, res: Response) => {
-  const { name, startDate, endDate } = req.body;
+app.post("/api/bookings", async (req: Request, res: Response) => {
+  const parsed = createBookingSchema.safeParse(req.body);
 
-  // Validierung: Erforderliche Felder prüfen
-  if (!name || !startDate || !endDate) {
-    return res.status(400).json({ message: "name, startDate and endDate are required" });
+  if (!parsed.success) {
+    return res.status(400).json({
+      message: "Validation failed",
+      errors: parsed.error.flatten(),
+    });
   }
 
-  // Datum-Objekte erstellen zur Validierung
+  const { name, startDate, endDate } = parsed.data;
+
   const start = new Date(startDate);
   const end = new Date(endDate);
 
-  // Validierung: Gültige Datumsformat prüfen
   if (isNaN(start.getTime()) || isNaN(end.getTime())) {
     return res.status(400).json({ message: "Invalid date format" });
   }
 
-  // Validierung: Enddatum darf nicht vor Startdatum liegen
   if (end < start) {
     return res.status(400).json({ message: "endDate cannot be before startDate" });
   }
 
-  const bookings = readBookings();
-
-  // Neues Booking mit eindeutiger ID erstellen
   const newBooking: Booking = {
-    id: crypto.randomUUID(),
+    _id: new ObjectId(),
     name,
     startDate,
-    endDate
+    endDate,
   };
 
-  // Neues Booking zur Liste hinzufügen und speichern
-  bookings.push(newBooking);
-  writeBookings(bookings);
+  const db = await connectToDatabase();
+  await db.collection<Booking>("bookings").insertOne(newBooking);
 
-  res.status(201).json(newBooking);
+  res.status(201).json(
+    toBookingResponse(newBooking as Booking & { _id: ObjectId })
+  );
 });
 
-// PATCH: Bestehendes Booking aktualisieren
-app.patch("/api/bookings/:id", (req: Request, res: Response) => {
-  const bookings = readBookings();
-  // Index des Bookings suchen
-  const index = bookings.findIndex((b) => b.id === req.params.id);
+app.patch("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid booking id" });
+  }
 
-  // Fehlerbehandlung: Booking nicht gefunden
-  if (index === -1) {
+  const parsed = updateBookingSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      message: "Validation failed",
+      errors: parsed.error.flatten(),
+    });
+  }
+
+  const db = await connectToDatabase();
+  const collection = db.collection<Booking>("bookings");
+  const objectId = new ObjectId(req.params.id);
+
+  const existingBooking = await collection.findOne({ _id: objectId });
+
+  if (!existingBooking) {
     return res.status(404).json({ message: "Booking not found" });
   }
 
-  // Bestehendes Booking mit neuen Daten mergen
   const updatedBooking: Booking = {
-    ...bookings[index],
-    ...req.body
+    _id: existingBooking._id,
+    name: parsed.data.name ?? existingBooking.name,
+    startDate: parsed.data.startDate ?? existingBooking.startDate,
+    endDate: parsed.data.endDate ?? existingBooking.endDate,
   };
 
-  // Validierung: Erforderliche Felder prüfen
-  if (!updatedBooking.name || !updatedBooking.startDate || !updatedBooking.endDate) {
-    return res.status(400).json({ message: "name, startDate and endDate are required" });
-  }
-
-  // Validierung: Gültige Datumsformat prüfen
   const start = new Date(updatedBooking.startDate);
   const end = new Date(updatedBooking.endDate);
 
@@ -118,40 +122,50 @@ app.patch("/api/bookings/:id", (req: Request, res: Response) => {
     return res.status(400).json({ message: "Invalid date format" });
   }
 
-  // Validierung: Enddatum darf nicht vor Startdatum liegen
   if (end < start) {
     return res.status(400).json({ message: "endDate cannot be before startDate" });
   }
 
-  // Aktualisiertes Booking speichern
-  bookings[index] = updatedBooking;
-  writeBookings(bookings);
+  await collection.updateOne(
+    { _id: objectId },
+    {
+      $set: {
+        name: updatedBooking.name,
+        startDate: updatedBooking.startDate,
+        endDate: updatedBooking.endDate,
+      },
+    }
+  );
 
-  res.json(updatedBooking);
+  res.json(toBookingResponse(updatedBooking as Booking & { _id: ObjectId }));
 });
 
-// DELETE: Booking löschen
-app.delete("/api/bookings/:id", (req: Request, res: Response) => {
-  const bookings = readBookings();
-  // Index des Bookings suchen
-  const index = bookings.findIndex((b) => b.id === req.params.id);
+app.delete("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid booking id" });
+  }
 
-  // Fehlerbehandlung: Booking nicht gefunden
-  if (index === -1) {
+  const db = await connectToDatabase();
+  const collection = db.collection<Booking>("bookings");
+  const objectId = new ObjectId(req.params.id);
+
+  const existingBooking = await collection.findOne({ _id: objectId });
+
+  if (!existingBooking) {
     return res.status(404).json({ message: "Booking not found" });
   }
 
-  // Gelöschtes Booking speichern für Response
-  const deletedBooking = bookings[index];
-  // Booking aus Array entfernen
-  bookings.splice(index, 1);
-  // Änderungen speichern
-  writeBookings(bookings);
+  await collection.deleteOne({ _id: objectId });
 
-  res.json(deletedBooking);
+  res.json(toBookingResponse(existingBooking as Booking & { _id: ObjectId }));
 });
 
-// Server starten und auf dem angegebenen Port lauschen
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+async function startServer() {
+  await connectToDatabase();
+
+  app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();
