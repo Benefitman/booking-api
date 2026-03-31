@@ -1,19 +1,18 @@
 import express, { Request, Response } from "express";
-import { ObjectId } from "mongodb";
+import { ObjectId, WithId } from "mongodb";
 import { connectToDatabase } from "./db";
 import { Booking } from "./types/booking";
 import { createBookingSchema, updateBookingSchema } from "./schemas/booking.schema";
 
-// Express app setup: JSON body parsing, route definitions, etc.
-// The server is started at the bottom with startServer().
+// Initialize Express app and port
 const app = express();
 const PORT = 3000;
 
+// Use JSON parser for all incoming requests
 app.use(express.json());
 
-// Translate internal Booking object (including MongoDB ObjectId) into public API response.
-// The API always exposes string ids, so we stringify ObjectId.
-function toBookingResponse(booking: Booking & { _id: ObjectId }) {
+// Map internal Booking document to API response shape, converting ObjectId to string
+function toBookingResponse(booking: WithId<Booking>) {
   return {
     id: booking._id.toString(),
     name: booking.name,
@@ -22,40 +21,39 @@ function toBookingResponse(booking: Booking & { _id: ObjectId }) {
   };
 }
 
-// GET /api/bookings: fetch all booking documents and return as normalized responses.
+// GET /api/bookings
 app.get("/api/bookings", async (_req: Request, res: Response) => {
   const db = await connectToDatabase();
-  // find() returns a cursor; toArray() eagerly loads all results into memory.
   const bookings = await db.collection<Booking>("bookings").find().toArray();
 
-  // Convert internal objects to API representation and return.
-  res.json(
-    bookings.map((booking) =>
-      toBookingResponse(booking as Booking & { _id: ObjectId })
-    )
-  );
+  res.json(bookings.map(toBookingResponse));
 });
 
-// GET /api/bookings/:id: validate id, fetch exact document, handle 404 if missing.
+// GET /api/bookings/:id
 app.get("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
+  // Validate that route parameter is a valid MongoDB ObjectId string
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid booking id" });
   }
 
+  // Connect to DB and fetch booking by ObjectId
   const db = await connectToDatabase();
   const booking = await db
     .collection<Booking>("bookings")
     .findOne({ _id: new ObjectId(req.params.id) });
 
+  // Return 404 when booking does not exist
   if (!booking) {
     return res.status(404).json({ message: "Booking not found" });
   }
 
-  res.json(toBookingResponse(booking as Booking & { _id: ObjectId }));
+  // Convert MongoDB document to API-friendly response
+  res.json(toBookingResponse(booking));
 });
 
-// POST /api/bookings: validate payload, enforce date rules, insert with generated ObjectId.
+// POST /api/bookings
 app.post("/api/bookings", async (req: Request, res: Response) => {
+  // Validate request body with zod schema
   const parsed = createBookingSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -67,6 +65,7 @@ app.post("/api/bookings", async (req: Request, res: Response) => {
 
   const { name, startDate, endDate } = parsed.data;
 
+  // Ensure provided dates are valid
   const start = new Date(startDate);
   const end = new Date(endDate);
 
@@ -74,31 +73,39 @@ app.post("/api/bookings", async (req: Request, res: Response) => {
     return res.status(400).json({ message: "Invalid date format" });
   }
 
+  // Enforce business rule: endDate must not be before startDate
   if (end < start) {
     return res.status(400).json({ message: "endDate cannot be before startDate" });
   }
 
-  const newBooking: Booking = {
-    _id: new ObjectId(),
+  const db = await connectToDatabase();
+
+  const newBooking = {
     name,
     startDate,
     endDate,
   };
 
-  const db = await connectToDatabase();
-  await db.collection<Booking>("bookings").insertOne(newBooking);
+  // Insert booking; MongoDB generates _id automatically
+  const result = await db.collection<Booking>("bookings").insertOne(newBooking);
 
-  res.status(201).json(
-    toBookingResponse(newBooking as Booking & { _id: ObjectId })
-  );
+  // Return created booking with string ID
+  res.status(201).json({
+    id: result.insertedId.toString(),
+    name,
+    startDate,
+    endDate,
+  });
 });
 
-// PATCH /api/bookings/:id: allow partial update with validation and date constraints.
+// PATCH /api/bookings/:id
 app.patch("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
+  // Validate route parameter first
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid booking id" });
   }
 
+  // Validate request body for allowed update fields
   const parsed = updateBookingSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -112,19 +119,21 @@ app.patch("/api/bookings/:id", async (req: Request<{ id: string }>, res: Respons
   const collection = db.collection<Booking>("bookings");
   const objectId = new ObjectId(req.params.id);
 
+  // Ensure booking exists before update
   const existingBooking = await collection.findOne({ _id: objectId });
 
   if (!existingBooking) {
     return res.status(404).json({ message: "Booking not found" });
   }
 
-  const updatedBooking: Booking = {
-    _id: existingBooking._id,
+  // Merge update payload with existing values
+  const updatedBooking = {
     name: parsed.data.name ?? existingBooking.name,
     startDate: parsed.data.startDate ?? existingBooking.startDate,
     endDate: parsed.data.endDate ?? existingBooking.endDate,
   };
 
+  // Validate date values in merged object
   const start = new Date(updatedBooking.startDate);
   const end = new Date(updatedBooking.endDate);
 
@@ -136,22 +145,25 @@ app.patch("/api/bookings/:id", async (req: Request<{ id: string }>, res: Respons
     return res.status(400).json({ message: "endDate cannot be before startDate" });
   }
 
+  // Persist update
   await collection.updateOne(
     { _id: objectId },
-    {
-      $set: {
-        name: updatedBooking.name,
-        startDate: updatedBooking.startDate,
-        endDate: updatedBooking.endDate,
-      },
-    }
+    { $set: updatedBooking }
   );
 
-  res.json(toBookingResponse(updatedBooking as Booking & { _id: ObjectId }));
+  const responseBooking: WithId<Booking> = {
+    _id: existingBooking._id,
+    name: updatedBooking.name,
+    startDate: updatedBooking.startDate,
+    endDate: updatedBooking.endDate,
+  };
+
+  res.json(toBookingResponse(responseBooking));
 });
 
-// DELETE /api/bookings/:id: remove a booking by id and return the deleted entity reference.
+// DELETE /api/bookings/:id
 app.delete("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
+  // Validate route parameter as MongoDB ObjectId
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid booking id" });
   }
@@ -160,6 +172,7 @@ app.delete("/api/bookings/:id", async (req: Request<{ id: string }>, res: Respon
   const collection = db.collection<Booking>("bookings");
   const objectId = new ObjectId(req.params.id);
 
+  // Check if resource exists before deletion
   const existingBooking = await collection.findOne({ _id: objectId });
 
   if (!existingBooking) {
@@ -168,10 +181,11 @@ app.delete("/api/bookings/:id", async (req: Request<{ id: string }>, res: Respon
 
   await collection.deleteOne({ _id: objectId });
 
-  res.json(toBookingResponse(existingBooking as Booking & { _id: ObjectId }));
+  // Return deleted resource representation
+  res.json(toBookingResponse(existingBooking));
 });
 
-// startServer: ensure DB is reachable before listening on port.
+// Start server only after ensuring DB connection works
 async function startServer() {
   await connectToDatabase();
 
