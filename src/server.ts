@@ -4,11 +4,15 @@ import { connectToDatabase } from "./db";
 import { Booking } from "./types/booking";
 import { createBookingSchema, updateBookingSchema } from "./schemas/booking.schema";
 
+// Express app setup: JSON body parsing, route definitions, etc.
+// The server is started at the bottom with startServer().
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
 
+// Translate internal Booking object (including MongoDB ObjectId) into public API response.
+// The API always exposes string ids, so we stringify ObjectId.
 function toBookingResponse(booking: Booking & { _id: ObjectId }) {
   return {
     id: booking._id.toString(),
@@ -18,10 +22,13 @@ function toBookingResponse(booking: Booking & { _id: ObjectId }) {
   };
 }
 
+// GET /api/bookings: fetch all booking documents and return as normalized responses.
 app.get("/api/bookings", async (_req: Request, res: Response) => {
   const db = await connectToDatabase();
+  // find() returns a cursor; toArray() eagerly loads all results into memory.
   const bookings = await db.collection<Booking>("bookings").find().toArray();
 
+  // Convert internal objects to API representation and return.
   res.json(
     bookings.map((booking) =>
       toBookingResponse(booking as Booking & { _id: ObjectId })
@@ -29,6 +36,7 @@ app.get("/api/bookings", async (_req: Request, res: Response) => {
   );
 });
 
+// GET /api/bookings/:id: validate id, fetch exact document, handle 404 if missing.
 app.get("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid booking id" });
@@ -46,6 +54,7 @@ app.get("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response)
   res.json(toBookingResponse(booking as Booking & { _id: ObjectId }));
 });
 
+// POST /api/bookings: validate payload, enforce date rules, insert with generated ObjectId.
 app.post("/api/bookings", async (req: Request, res: Response) => {
   const parsed = createBookingSchema.safeParse(req.body);
 
@@ -84,6 +93,7 @@ app.post("/api/bookings", async (req: Request, res: Response) => {
   );
 });
 
+// PATCH /api/bookings/:id: allow partial update with validation and date constraints.
 app.patch("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid booking id" });
@@ -140,6 +150,7 @@ app.patch("/api/bookings/:id", async (req: Request<{ id: string }>, res: Respons
   res.json(toBookingResponse(updatedBooking as Booking & { _id: ObjectId }));
 });
 
+// DELETE /api/bookings/:id: remove a booking by id and return the deleted entity reference.
 app.delete("/api/bookings/:id", async (req: Request<{ id: string }>, res: Response) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid booking id" });
@@ -160,6 +171,7 @@ app.delete("/api/bookings/:id", async (req: Request<{ id: string }>, res: Respon
   res.json(toBookingResponse(existingBooking as Booking & { _id: ObjectId }));
 });
 
+// startServer: ensure DB is reachable before listening on port.
 async function startServer() {
   await connectToDatabase();
 
