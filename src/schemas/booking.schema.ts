@@ -1,10 +1,7 @@
 import { z } from "zod";
 
-const productIdSchema = z.enum(["monitor", "keyboard", "mouse"]);
-
 const bookedProductSchema = z.object({
-  productId: productIdSchema,
-  name: z.string().min(1, "product name is required"),
+  productId: z.string().min(1, "productId is required"),
   quantity: z.number().int().min(1, "quantity must be at least 1"),
 });
 
