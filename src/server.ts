@@ -2,8 +2,12 @@ import express, { Request, Response } from "express";
 import { ObjectId, WithId, Db } from "mongodb";
 import { connectToDatabase } from "./db";
 import { Booking } from "./types/booking";
+import { Product } from "./types/product";
+import { createProductSchema } from "./schemas/product.schema";
 import { z } from "zod";
 import { createBookingSchema, updateBookingSchema } from "./schemas/booking.schema";
+
+
 
 const app = express();
 // Use JSON body parsing for all incoming requests so we can access req.body.
@@ -38,6 +42,87 @@ async function toBookingResponse(db: Db, booking: WithId<Booking>) {
     products,
   };
 }
+
+app.get("/api/products", async (_req: Request, res: Response) => {
+  // Retrieve all products for the basic product catalog route.
+  const db = await connectToDatabase();
+  const products = await db.collection<Product>("products").find().toArray();
+
+  res.json(
+    products.map((product) => ({
+      id: product._id.toString(),
+      name: product.name,
+    }))
+  );
+});
+
+app.post("/api/products", async (req: Request, res: Response) => {
+  // Create a new product, ensuring the payload is valid and no duplicate name exists.
+  const parsed = createProductSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      message: "Validation failed",
+      errors: z.flattenError(parsed.error),
+    });
+  }
+
+  const db = await connectToDatabase();
+  const collection = db.collection<Product>("products");
+
+  const existingProduct = await collection.findOne({ name: parsed.data.name });
+
+  if (existingProduct) {
+    return res.status(400).json({ message: "Product already exists" });
+  }
+
+  const newProduct: Product = {
+    name: parsed.data.name,
+  };
+
+  const result = await collection.insertOne(newProduct);
+
+  res.status(201).json({
+    id: result.insertedId.toString(),
+    name: newProduct.name,
+  });
+});
+
+app.delete("/api/products/:id", async (req: Request<{ id: string }>, res: Response) => {
+  // Delete a product and clean up bookings that include it.
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid product id" });
+  }
+
+  const db = await connectToDatabase();
+  const productsCollection = db.collection<Product>("products");
+  const bookingsCollection = db.collection<Booking>("bookings");
+  const productId = new ObjectId(req.params.id);
+
+  const existingProduct = await productsCollection.findOne({ _id: productId });
+
+  if (!existingProduct) {
+    return res.status(404).json({ message: "Product not found" });
+  }
+
+  await productsCollection.deleteOne({ _id: productId });
+
+  await bookingsCollection.updateMany(
+    {},
+    {
+      $pull: {
+        products: { productId: productId },
+      },
+    }
+  );
+
+  res.json({
+    id: existingProduct._id.toString(),
+    name: existingProduct.name,
+  });
+});
+
+
 
 app.get("/api/bookings", async (_req: Request, res: Response) => {
   // List all bookings with expanded product details.
@@ -75,8 +160,7 @@ app.get("/api/products/summary", async (_req: Request, res: Response) => {
   const db = await connectToDatabase();
   const collection = db.collection<Booking>("bookings");
 
-  type ProductName = "Monitor" | "Tastatur" | "Maus";
-  type SummaryItem = { _id: ProductName; totalQuantity: number };
+  type SummaryItem = { _id: string; totalQuantity: number };
 
   const summary = await collection
     .aggregate<SummaryItem>([
@@ -99,26 +183,18 @@ app.get("/api/products/summary", async (_req: Request, res: Response) => {
     ])
     .toArray();
 
-  const response: Record<ProductName, number> & { total: number } = {
-    Monitor: 0,
-    Tastatur: 0,
-    Maus: 0,
+  const response: Record<string, number> = {
     total: 0,
   };
 
   for (const item of summary) {
-    if (
-      item._id === "Monitor" ||
-      item._id === "Tastatur" ||
-      item._id === "Maus"
-    ) {
-      response[item._id] = item.totalQuantity;
-      response.total += item.totalQuantity;
-    }
+    response[item._id] = item.totalQuantity;
+    response.total += item.totalQuantity;
   }
 
   res.json(response);
 });
+
 
 app.post("/api/bookings", async (req: Request, res: Response) => {
   // Validate incoming payload with Zod schema before any DB operations.
