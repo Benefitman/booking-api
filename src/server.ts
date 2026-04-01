@@ -1,4 +1,6 @@
+import "dotenv/config"; // Load environment variables from .env file
 import express, { Request, Response } from "express";
+import { basicAuth } from "./middleware/auth";
 import { ObjectId, WithId } from "mongodb";
 import { connectToDatabase } from "./db";
 import { Booking } from "./types/booking";
@@ -10,6 +12,7 @@ const PORT = 3000;
 
 // Use JSON parser for all incoming requests
 app.use(express.json());
+app.use("/api/bookings", basicAuth); // Apply basic authentication middleware to all routes
 
 // Map internal Booking document to API response shape, converting ObjectId to string
 function toBookingResponse(booking: WithId<Booking>) {
@@ -195,3 +198,6 @@ async function startServer() {
 }
 
 startServer();
+
+
+//nur autorisiert anfragen mit username und passwort
